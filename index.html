@@ -601,6 +601,14 @@
 
 <script>
 // Shop hours: 0=Sun ... 6=Sat. Times in 24h minutes-from-midnight.
+/* ================= AIRTABLE CONFIG =================
+   Fill these two in before the booking form will work.
+   See the setup steps you were given for exactly what to create. */
+const AIRTABLE_BASE_ID = "appgxkz4Ev0028Pbp";       // starts with "app..."
+const AIRTABLE_TABLE   = "Bookings";                // must match your table name exactly
+const AIRTABLE_TOKEN   = "patjDXAVN5znnniN1.06d106756f1de198c7e454a682a99fac25621548ca8af3da46d30a98bf9f5528";
+/* ===================================================== */
+
 const HOURS = [
   {label:"Sunday",    open:9*60+30,  close:15*60},
   {label:"Monday",    open:12*60,    close:20*60},
@@ -653,42 +661,113 @@ function paintHoursTable(tbodyId){
     </tr>`).join("");
 }
 
-/* ---------------- storage helpers ---------------- */
-async function safeStorageCall(fn, fallback){
-  try{
-    const res = await fn();
-    return res;
-  }catch(err){
-    console.error("Storage error:", err);
-    return fallback;
+/* ---------------- Airtable storage helpers ---------------- */
+async function airtableRequest(path, options={}){
+  const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE)}${path}`;
+  const res = await fetch(url, {
+    ...options,
+    headers:{
+      "Authorization": `Bearer ${AIRTABLE_TOKEN}`,
+      "Content-Type": "application/json",
+      ...(options.headers||{})
+    }
+  });
+  if(!res.ok){
+    console.error("Airtable error:", res.status, await res.text());
+    throw new Error(`Airtable error ${res.status}`);
   }
+  return res.json();
+}
+
+function bookingToFields(b){
+  return {
+    "Ticket ID": b.id,
+    "Name": b.name,
+    "Phone": b.phone,
+    "Email": b.email || "",
+    "Guest Type": b.guestType,
+    "Service": b.service,
+    "Date": b.date,
+    "Time": b.time,
+    "Barber": b.barber,
+    "Notes": b.notes || "",
+    "Status": b.status,
+  };
+}
+
+function fieldsToBooking(record){
+  const f = record.fields || {};
+  return {
+    recordId: record.id,
+    id: f["Ticket ID"] || record.id,
+    name: f["Name"] || "",
+    phone: f["Phone"] || "",
+    email: f["Email"] || "",
+    guestType: f["Guest Type"] || "",
+    service: f["Service"] || "",
+    date: f["Date"] || "",
+    time: f["Time"] || "",
+    barber: f["Barber"] || "",
+    notes: f["Notes"] || "",
+    status: (f["Status"] || "pending").toLowerCase(),
+  };
 }
 
 async function saveBooking(booking){
-  const key = `booking:${booking.id}`;
-  return safeStorageCall(()=>window.storage.set(key, JSON.stringify(booking), true), null);
+  try{
+    return await airtableRequest("", {
+      method: "POST",
+      body: JSON.stringify({records:[{fields: bookingToFields(booking)}]})
+    });
+  }catch(err){
+    console.error("Save booking failed:", err);
+    return null;
+  }
 }
 
 async function updateBooking(booking){
-  return saveBooking(booking);
+  if(!booking.recordId){
+    const all = await listBookings();
+    const match = all.find(b => b.id === booking.id);
+    if(match) booking.recordId = match.recordId;
+  }
+  if(!booking.recordId) return null;
+  try{
+    return await airtableRequest(`/${booking.recordId}`, {
+      method: "PATCH",
+      body: JSON.stringify({fields: bookingToFields(booking)})
+    });
+  }catch(err){
+    console.error("Update booking failed:", err);
+    return null;
+  }
 }
 
-async function deleteBooking(id){
-  return safeStorageCall(()=>window.storage.delete(`booking:${id}`, true), null);
+async function deleteBooking(recordId){
+  try{
+    return await airtableRequest(`/${recordId}`, {method:"DELETE"});
+  }catch(err){
+    console.error("Delete booking failed:", err);
+    return null;
+  }
 }
 
 async function listBookings(){
-  const list = await safeStorageCall(()=>window.storage.list("booking:", true), {keys:[]});
-  if(!list || !list.keys) return [];
-  const results = [];
-  for(const k of list.keys){
-    const rec = await safeStorageCall(()=>window.storage.get(k, true), null);
-    if(rec && rec.value){
-      try{ results.push(JSON.parse(rec.value)); }catch(e){ /* skip corrupt */ }
-    }
+  try{
+    let all = [];
+    let offset = null;
+    do{
+      const qs = offset ? `?pageSize=100&offset=${offset}` : `?pageSize=100`;
+      const data = await airtableRequest(qs, {method:"GET"});
+      all = all.concat((data.records||[]).map(fieldsToBooking));
+      offset = data.offset;
+    } while(offset);
+    all.sort((a,b)=> (a.date+a.time).localeCompare(b.date+b.time));
+    return all;
+  }catch(err){
+    console.error("List bookings failed:", err);
+    return [];
   }
-  results.sort((a,b)=> (a.date+a.time).localeCompare(b.date+b.time));
-  return results;
 }
 
 function newTicketId(){
