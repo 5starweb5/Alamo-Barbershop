@@ -530,11 +530,14 @@
               <dt>Date</dt><dd id="c-date"></dd>
               <dt>Time</dt><dd id="c-time"></dd>
               <dt>Barber</dt><dd id="c-barber"></dd>
-              <dt>Status</dt><dd><span class="badge pending">Pending confirmation</span></dd>
+              <dt>Status</dt><dd><span class="badge pending" id="c-status-badge">Pending confirmation</span></dd>
             </dl>
           </div>
           <p class="hint" style="margin-top:16px;">Save a screenshot of your ticket number. Our staff will call to confirm — or call us at <a href="tel:+12109564766" style="color:var(--accent);font-weight:600;">(210) 956-4766</a> to confirm sooner.</p>
-          <button class="btn btn-outline" id="book-another" style="margin-top:10px;">Book Another</button>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;">
+            <button class="btn btn-outline" id="refresh-status">↻ Refresh Status</button>
+            <button class="btn btn-outline" id="book-another">Book Another</button>
+          </div>
         </div>
       </div>
     </div>
@@ -805,6 +808,50 @@ document.getElementById("year").textContent = new Date().getFullYear();
 paintStatusBadge("status-badge");
 paintHoursTable("hours-body");
 
+const LAST_TICKET_KEY = "alamo_last_ticket_id";
+const BADGE_MAP = {
+  pending:   ["pending",   "Pending confirmation"],
+  confirmed: ["confirmed", "Confirmed — see you soon!"],
+  done:      ["done",      "Completed"],
+  cancelled: ["cancelled", "Cancelled"],
+};
+
+/* ---------- pull Service / Barber choices live from Airtable ---------- */
+async function loadFieldOptions(){
+  try{
+    const res = await fetch(`https://api.airtable.com/v0/meta/bases/${AIRTABLE_BASE_ID}/tables`, {
+      headers: { "Authorization": `Bearer ${AIRTABLE_TOKEN}` }
+    });
+    if(!res.ok) throw new Error(`Meta API error ${res.status} — token likely needs the schema.bases:read scope`);
+    const data = await res.json();
+    const table = (data.tables || []).find(t => t.name === AIRTABLE_TABLE);
+    if(!table) return;
+
+    const serviceField = table.fields.find(f => f.name === "Service");
+    if(serviceField?.options?.choices?.length){
+      const el = document.getElementById("service");
+      const current = el.value;
+      el.innerHTML = serviceField.options.choices
+        .map(c => `<option value="${c.name}">${c.name}</option>`).join("");
+      if([...el.options].some(o => o.value === current)) el.value = current;
+    }
+
+    const barberField = table.fields.find(f => f.name === "Barber");
+    if(barberField?.options?.choices?.length){
+      const el = document.getElementById("barber");
+      const current = el.value;
+      const names = barberField.options.choices.map(c => c.name).filter(n => n !== "No preference");
+      el.innerHTML = ['<option value="No preference">No preference — first available</option>']
+        .concat(names.map(n => `<option value="${n}">Ask for ${n}</option>`)).join("");
+      if([...el.options].some(o => o.value === current)) el.value = current;
+    }
+  }catch(err){
+    // Falls back to the hardcoded options already in the HTML — not fatal.
+    console.warn("Could not load live options from Airtable:", err.message);
+  }
+}
+loadFieldOptions();
+
 /* ---------- booking form ---------- */
 const dateInput = document.getElementById("date");
 const timeSelect = document.getElementById("time");
@@ -838,6 +885,33 @@ document.querySelectorAll('#who-row input').forEach(r=>{
   });
 });
 
+function renderTicket(booking){
+  document.getElementById("ticket-id").textContent = booking.id;
+  document.getElementById("c-name").textContent = booking.name;
+  document.getElementById("c-service").textContent = `${booking.service} (${booking.guestType})`;
+  document.getElementById("c-date").textContent = booking.date;
+  document.getElementById("c-time").textContent = booking.time;
+  document.getElementById("c-barber").textContent = booking.barber;
+  const [cls, label] = BADGE_MAP[booking.status] || BADGE_MAP.pending;
+  const badgeEl = document.getElementById("c-status-badge");
+  badgeEl.className = `badge ${cls}`;
+  badgeEl.textContent = label;
+  document.getElementById("form-view").style.display = "none";
+  document.getElementById("confirm-view").style.display = "block";
+}
+
+async function fetchBookingByTicket(ticketId){
+  try{
+    const formula = `{Ticket ID}='${ticketId.replace(/'/g, "\\'")}'`;
+    const data = await airtableRequest(`?filterByFormula=${encodeURIComponent(formula)}`, {method:"GET"});
+    if(data.records && data.records.length) return fieldsToBooking(data.records[0]);
+    return null;
+  }catch(err){
+    console.error("Fetch ticket status failed:", err);
+    return null;
+  }
+}
+
 document.getElementById("booking-form").addEventListener("submit", async (e)=>{
   e.preventDefault();
   const btn = e.target.querySelector("button[type=submit]");
@@ -869,22 +943,37 @@ document.getElementById("booking-form").addEventListener("submit", async (e)=>{
     return;
   }
 
-  document.getElementById("ticket-id").textContent = booking.id;
-  document.getElementById("c-name").textContent = booking.name;
-  document.getElementById("c-service").textContent = `${booking.service} (${booking.guestType})`;
-  document.getElementById("c-date").textContent = booking.date;
-  document.getElementById("c-time").textContent = booking.time;
-  document.getElementById("c-barber").textContent = booking.barber;
-  document.getElementById("form-view").style.display = "none";
-  document.getElementById("confirm-view").style.display = "block";
+  localStorage.setItem(LAST_TICKET_KEY, booking.id);
+  renderTicket(booking);
 });
 
 document.getElementById("book-another").addEventListener("click", ()=>{
+  localStorage.removeItem(LAST_TICKET_KEY);
   document.getElementById("booking-form").reset();
   buildSlots("");
   document.getElementById("confirm-view").style.display = "none";
   document.getElementById("form-view").style.display = "block";
 });
+
+document.getElementById("refresh-status").addEventListener("click", async ()=>{
+  const btn = document.getElementById("refresh-status");
+  const id = localStorage.getItem(LAST_TICKET_KEY);
+  if(!id) return;
+  btn.disabled = true; btn.textContent = "Checking…";
+  const live = await fetchBookingByTicket(id);
+  btn.disabled = false; btn.textContent = "↻ Refresh Status";
+  if(live) renderTicket(live);
+  else toast("Couldn't reach Airtable to check status — try again in a moment.");
+});
+
+/* ---------- restore ticket view on page load / refresh ---------- */
+(async function restoreTicketOnLoad(){
+  const savedId = localStorage.getItem(LAST_TICKET_KEY);
+  if(!savedId) return;
+  const live = await fetchBookingByTicket(savedId);
+  if(live) renderTicket(live);
+  else localStorage.removeItem(LAST_TICKET_KEY);
+})();
 </script>
 </body>
 </html>
