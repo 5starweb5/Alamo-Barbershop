@@ -662,6 +662,8 @@ function paintHoursTable(tbodyId){
 }
 
 /* ---------------- Airtable storage helpers ---------------- */
+let lastAirtableError = "";
+
 async function airtableRequest(path, options={}){
   const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE)}${path}`;
   const res = await fetch(url, {
@@ -673,8 +675,15 @@ async function airtableRequest(path, options={}){
     }
   });
   if(!res.ok){
-    console.error("Airtable error:", res.status, await res.text());
-    throw new Error(`Airtable error ${res.status}`);
+    const bodyText = await res.text();
+    console.error("Airtable error:", res.status, bodyText);
+    let message = `Airtable error ${res.status}`;
+    try{
+      const parsed = JSON.parse(bodyText);
+      if(parsed && parsed.error && parsed.error.message) message = parsed.error.message;
+    }catch(e){ /* body wasn't JSON, keep generic message */ }
+    lastAirtableError = message;
+    throw new Error(message);
   }
   return res.json();
 }
@@ -715,9 +724,10 @@ function fieldsToBooking(record){
 
 async function saveBooking(booking){
   try{
+    lastAirtableError = "";
     return await airtableRequest("", {
       method: "POST",
-      body: JSON.stringify({records:[{fields: bookingToFields(booking)}]})
+      body: JSON.stringify({records:[{fields: bookingToFields(booking)}], typecast: true})
     });
   }catch(err){
     console.error("Save booking failed:", err);
@@ -733,9 +743,10 @@ async function updateBooking(booking){
   }
   if(!booking.recordId) return null;
   try{
+    lastAirtableError = "";
     return await airtableRequest(`/${booking.recordId}`, {
       method: "PATCH",
-      body: JSON.stringify({fields: bookingToFields(booking)})
+      body: JSON.stringify({fields: bookingToFields(booking), typecast: true})
     });
   }catch(err){
     console.error("Update booking failed:", err);
@@ -754,6 +765,7 @@ async function deleteBooking(recordId){
 
 async function listBookings(){
   try{
+    lastAirtableError = "";
     let all = [];
     let offset = null;
     do{
@@ -853,7 +865,7 @@ document.getElementById("booking-form").addEventListener("submit", async (e)=>{
   btn.disabled = false; btn.textContent = "Reserve My Chair";
 
   if(!saved){
-    toast("Something went wrong saving your booking — please call us instead.");
+    toast(lastAirtableError ? `Booking failed: ${lastAirtableError}` : "Something went wrong saving your booking — please call us instead.");
     return;
   }
 
